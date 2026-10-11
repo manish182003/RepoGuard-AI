@@ -1,0 +1,12 @@
+groq 
+pydantic 
+pydantic-settings 
+python-dotenv 
+httpx 
+fastapi 
+uvicorn
+pytest 
+pytest-asyncio 
+ruff
+openai
+json-repair

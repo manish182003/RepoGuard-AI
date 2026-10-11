@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>RepoGuard AI — Live SSE Stream & Human Approval Demo</title>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 20px; }
+    .container { max-width: 900px; margin: 0 auto; background: #161b22; padding: 25px; border-radius: 10px; border: 1px solid #30363d; }
+    h1 { color: #58a6ff; margin-top: 0; }
+    .input-group { display: flex; gap: 10px; margin-bottom: 20px; }
+    input[type="text"] { flex: 1; padding: 12px; border-radius: 6px; border: 1px solid #30363d; background: #0d1117; color: #fff; font-size: 14px; }
+    button { padding: 12px 20px; border-radius: 6px; border: none; background: #238636; color: white; font-weight: bold; cursor: pointer; font-size: 14px; }
+    button:hover { background: #2ea043; }
+    button.approve { background: #1f6feb; }
+    button.approve:hover { background: #388bfd; }
+    .stream-log { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 15px; height: 350px; overflow-y: auto; font-family: monospace; font-size: 13px; margin-bottom: 20px; }
+    .log-entry { margin-bottom: 8px; line-height: 1.4; border-bottom: 1px solid #21262d; padding-bottom: 6px; }
+    .event-type { color: #d2a8ff; font-weight: bold; }
+    .approval-card { background: #1c2128; border: 2px solid #e3b341; border-radius: 8px; padding: 15px; display: none; margin-bottom: 20px; }
+    .approval-card h3 { margin-top: 0; color: #f2cc60; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🛡️ RepoGuard AI — Real-Time Agent Demo</h1>
+    <p>Enter a GitHub repository URL to trigger autonomous code investigation, sandbox pytest execution, and human approval checkpoints.</p>
+
+    <div class="input-group">
+      <input type="text" id="repoUrl" value="https://github.com/bottlepy/bottle" placeholder="GitHub Repository URL" style="flex: 2;">
+      <input type="number" id="targetIssue" placeholder="Issue # (optional, e.g. 1470)" style="flex: 1; min-width: 150px;">
+      <button onclick="startInvestigation()">Start Investigation</button>
+    </div>
+
+    <div id="approvalCard" class="approval-card">
+      <h3>⚠️ Human Approval Required</h3>
+      <p id="approvalMsg">Patch verified via AST syntax check & subprocess sandbox! Do you approve opening a GitHub Pull Request?</p>
+      <input type="hidden" id="pendingJobId">
+      <button class="approve" onclick="approvePR(true)">Approve & Create PR</button>
+      <button style="background: #da3633;" onclick="approvePR(false)">Reject</button>
+    </div>
+
+    <h3>📡 Live SSE Event Stream:</h3>
+    <div id="streamLog" class="stream-log">
+      <div style="color: #8b949e;">Click "Start Investigation" to listen to real-time events...</div>
+    </div>
+  </div>
+
+  <script>
+    let currentJobId = null;
+
+    async function startInvestigation() {
+      const repoUrl = document.getElementById('repoUrl').value;
+      const targetIssue = document.getElementById('targetIssue').value;
+      const streamLog = document.getElementById('streamLog');
+      const approvalCard = document.getElementById('approvalCard');
+      
+      streamLog.innerHTML = '';
+      approvalCard.style.display = 'none';
+
+      const payload = {
+        repository_url: repoUrl,
+        auto_generate_patch: true,
+        human_approved_for_pr: false
+      };
+      if (targetIssue) {
+        payload.target_issue_number = parseInt(targetIssue, 10);
+      }
+
+      appendLog('system', `Connecting to /investigation/stream for ${repoUrl}${targetIssue ? ` (Targeting Issue #${targetIssue})` : ''}...`);
+
+      try {
+        const response = await fetch('/investigation/stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split('\n\n');
+          buffer = parts.pop(); // Keep incomplete chunk in buffer
+
+          for (const part of parts) {
+            if (part.startsWith('data: ')) {
+              const jsonStr = part.replace('data: ', '').trim();
+              if (jsonStr) {
+                try {
+                  const payload = JSON.parse(jsonStr);
+                  handleEvent(payload.event, payload.data);
+                } catch (e) {
+                  console.error("Failed to parse SSE JSON:", e);
+                }
+              }
+            }
+          }
+        }
+      } catch (err) {
+        appendLog('error', `Connection error: ${err}`);
+      }
+    }
+
+    function handleEvent(eventType, data) {
+      appendLog(eventType, JSON.stringify(data, null, 2));
+
+      if (eventType === 'human_approval_required') {
+        currentJobId = data.job_id;
+        document.getElementById('pendingJobId').value = data.job_id || '';
+        document.getElementById('approvalMsg').innerText = data.message || 'Approval required for PR creation.';
+        document.getElementById('approvalCard').style.display = 'block';
+      }
+    }
+
+    function appendLog(eventType, message) {
+      const streamLog = document.getElementById('streamLog');
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+      entry.innerHTML = `<span class="event-type">[${eventType}]</span> <pre style="margin: 4px 0; color: #8b949e; white-space: pre-wrap;">${escapeHtml(message)}</pre>`;
+      streamLog.appendChild(entry);
+      streamLog.scrollTop = streamLog.scrollHeight;
+    }
+
+    function escapeHtml(text) {
+      return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    async function approvePR(approved) {
+      if (!currentJobId) return;
+
+      appendLog('system', `Sending human approval decision (approved=${approved}) for job ${currentJobId}...`);
+      
+      try {
+        const res = await fetch('/investigation/approve', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            job_id: currentJobId,
+            human_approved_for_pr: approved
+          })
+        });
+
+        const data = await res.json();
+        document.getElementById('approvalCard').style.display = 'none';
+        appendLog('approval_result', JSON.stringify(data, null, 2));
+      } catch (err) {
+        appendLog('error', `Approval request failed: ${err}`);
+      }
+    }
+  </script>
+</body>
+</html>
